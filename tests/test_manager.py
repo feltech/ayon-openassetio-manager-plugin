@@ -1131,6 +1131,291 @@ class Test_getWithRelationship:
 
         assert errors[0] is not None
 
+    def test_when_specified_tag_latest_then_only_latest_version_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        version_trait.setSpecifiedTag("latest")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        latest_version = max(
+            versioned_representation.representations_by_version
+        )
+        assert [
+            _normalize_ref(r) for r in _drain_pager(pagers[0])
+        ] == [
+            _normalize_ref(
+                _ref_to_versioned(
+                    manager, versioned_representation, latest_version
+                )
+            )
+        ]
+
+    def test_when_specified_tag_not_latest_then_empty_pager_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        # Anything other than "latest" yields no results.
+        version_trait.setSpecifiedTag("v002")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert _drain_pager(pagers[0]) == []
+
+    def test_when_stable_tag_set_then_only_that_version_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        version_trait.setStableTag("v002")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert [
+            _normalize_ref(r) for r in _drain_pager(pagers[0])
+        ] == [
+            _normalize_ref(
+                _ref_to_versioned(manager, versioned_representation, 2)
+            )
+        ]
+
+    def test_when_stable_tag_numeric_then_only_that_version_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        # "N" form (no "v" prefix) is also accepted.
+        version_trait.setStableTag("3")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert [
+            _normalize_ref(r) for r in _drain_pager(pagers[0])
+        ] == [
+            _normalize_ref(
+                _ref_to_versioned(manager, versioned_representation, 3)
+            )
+        ]
+
+    def test_when_stable_tag_unparseable_then_empty_pager_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        # stableTag must be a concrete version number - "latest" is not
+        # valid.
+        version_trait.setStableTag("latest")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert _drain_pager(pagers[0]) == []
+
+    def test_when_stable_tag_no_match_then_empty_pager_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        # Valid format, but no such version exists.
+        version_trait.setStableTag("v999")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert _drain_pager(pagers[0]) == []
+
+    def test_when_specified_latest_and_stable_match_then_match_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        latest_version = max(
+            versioned_representation.representations_by_version
+        )
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        version_trait.setSpecifiedTag("latest")
+        version_trait.setStableTag(f"v{latest_version:03d}")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert [
+            _normalize_ref(r) for r in _drain_pager(pagers[0])
+        ] == [
+            _normalize_ref(
+                _ref_to_versioned(
+                    manager, versioned_representation, latest_version
+                )
+            )
+        ]
+
+    def test_when_specified_latest_and_stable_mismatch_then_empty(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        latest_version = max(
+            versioned_representation.representations_by_version
+        )
+        # Pick a stable tag that exists but isn't the latest.
+        non_latest_version = next(
+            v
+            for v in versioned_representation.representations_by_version
+            if v != latest_version
+        )
+
+        relationship = TraitsData()
+        version_trait = mc_traits.lifecycle.VersionTrait(relationship)
+        version_trait.imbue()
+        version_trait.setSpecifiedTag("latest")
+        version_trait.setStableTag(f"v{non_latest_version:03d}")
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert _drain_pager(pagers[0]) == []
+
+
 
 class Test_getWithRelationships:
     def test_when_version_relationship_then_all_versions_returned(

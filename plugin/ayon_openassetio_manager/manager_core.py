@@ -807,8 +807,20 @@ class AyonOpenAssetIOManagerInterfaceCore:
 
         Currently only supports the VersionTrait relationship with kRead
         access. For each input representation reference, returns a pager
-        of references to all versions of the same representation
-        (including the input version itself).
+        of references to versions of the same representation.
+
+        The VersionTrait's ``specifiedTag`` and ``stableTag`` properties
+        are honoured as optional filter predicates:
+
+        - ``specifiedTag`` only supports the value ``"latest"`` (in which
+          case only the most recent version is returned). Any other value
+          yields an empty pager.
+        - ``stableTag`` filters to a single concrete version number; both
+          ``"vNNN"`` and ``"N"`` formats are accepted. Any other value
+          yields an empty pager.
+
+        Both filters may be supplied at the same time, in which case both
+        must match (AND).
 
         The ``result_trait_set`` parameter is currently ignored.
 
@@ -843,6 +855,15 @@ class AyonOpenAssetIOManagerInterfaceCore:
                 )
             return
 
+        version_filter = self.__parse_version_filter(relationship_traits_data)
+        if version_filter is None:
+            # Filter excludes everything.
+            for idx in range(len(entity_references)):
+                success_callback(
+                    idx, _AyonEntityReferencePagerInterface(page_size, [])
+                )
+            return
+
         entity_identities = ayon_core_util.query_identity_for_entity_refs(
             [str(ref) for ref in entity_references]
         )
@@ -853,6 +874,7 @@ class AyonOpenAssetIOManagerInterfaceCore:
                 entity_ref,
                 entity_identities[idx],
                 page_size,
+                version_filter,
                 success_callback,
                 error_callback,
             )
@@ -873,8 +895,12 @@ class AyonOpenAssetIOManagerInterfaceCore:
 
         Currently only supports the VersionTrait relationship with kRead
         access. For each relationship in the batch, returns a pager of
-        references to all versions of the same representation referred
-        to by ``entity_reference``.
+        references to versions of the same representation referred to
+        by ``entity_reference``.
+
+        See ``getWithRelationship`` for details of the supported
+        VersionTrait predicate properties (``specifiedTag`` and
+        ``stableTag``).
 
         The ``result_trait_set`` parameter is currently ignored.
 
@@ -914,11 +940,20 @@ class AyonOpenAssetIOManagerInterfaceCore:
                 )
                 continue
 
+            version_filter = self.__parse_version_filter(
+                relationship_traits_data)
+            if version_filter is None:
+                success_callback(
+                    idx, _AyonEntityReferencePagerInterface(page_size, [])
+                )
+                continue
+
             self.__handle_version_relationship(
                 idx,
                 entity_reference,
                 entity_identity,
                 page_size,
+                version_filter,
                 success_callback,
                 error_callback,
             )
@@ -933,6 +968,57 @@ class AyonOpenAssetIOManagerInterfaceCore:
         """
         return mc_traits.lifecycle.VersionTrait.isImbuedTo(
             relationship_traits_data)
+
+    @staticmethod
+    def __parse_version_filter(
+        relationship_traits_data: TraitsData,
+    ) -> Callable[[int, int], bool] | None:
+        """Build a predicate from the VersionTrait filter properties.
+
+        Returns a callable ``(version_num, latest_version_num) -> bool``
+        that decides whether a given version number should be included
+        in the results, or ``None`` if the filter cannot be satisfied by
+        any version (in which case the caller should return an empty
+        pager).
+
+        Supported properties:
+
+        - ``specifiedTag``: only ``"latest"`` is supported. Any other
+            value returns ``None``.
+        - ``stableTag``: a concrete version number, either as ``"vNNN"``
+            or ``"N"``. Any other value (including ``"latest"``) returns
+            ``None``.
+        """
+        version_trait = mc_traits.lifecycle.VersionTrait(
+            relationship_traits_data)
+
+        specified_tag = version_trait.getSpecifiedTag()
+        stable_tag = version_trait.getStableTag()
+
+        only_latest = False
+        if specified_tag is not None:
+            if specified_tag != "latest":
+                return None
+            only_latest = True
+
+        stable_version_num: int | None = None
+        if stable_tag is not None:
+            try:
+                stable_version_num = int(stable_tag.lstrip("vV"))
+            except ValueError:
+                return None
+
+        def predicate(version_num: int, latest_version_num: int) -> bool:
+            if only_latest and version_num != latest_version_num:
+                return False
+            if (
+                stable_version_num is not None
+                and version_num != stable_version_num
+            ):
+                return False
+            return True
+
+        return predicate
 
     @staticmethod
     def __validate_relationship_access(
@@ -962,16 +1048,17 @@ class AyonOpenAssetIOManagerInterfaceCore:
         entity_ref: EntityReference,
         entity_identity: dict,
         page_size: int,
+        version_filter: Callable[[int, int], bool],
         success_callback: Callable[[int, EntityReferencePagerInterface], Any],
         error_callback: Callable[[int, BatchElementError], Any],
     ) -> None:
-        """Resolve and return all versions of the given representation.
+        """Resolve and return matching versions of the given representation.
 
         Builds a pager of entity references corresponding to all versions
-        of the representation pointed to by ``entity_ref``. Reports
-        ``kEntityResolutionError`` if the reference cannot be resolved,
-        and ``kInvalidEntityReference`` if it does not point to a
-        representation.
+        of the representation pointed to by ``entity_ref`` that pass
+        ``version_filter``. Reports ``kEntityResolutionError`` if the
+        reference cannot be resolved, and ``kInvalidEntityReference`` if
+        it does not point to a representation.
         """
         entities = entity_identity.get("entities") or []
         if not entities:
@@ -1047,6 +1134,13 @@ class AyonOpenAssetIOManagerInterfaceCore:
             )
         ) if version_ids else []
 
+        # Latest version - taken as the highest version number across
+        # all returned versions (negative numbers, used by AYON for
+        # hero versions, naturally lose to standard version numbers).
+        latest_version_num = (
+            max(version_num_by_id.values()) if version_num_by_id else 0
+        )
+
         # Order results by version number (most recent first), so that the
         # input version typically appears near the top.
         all_reps.sort(
@@ -1058,6 +1152,8 @@ class AyonOpenAssetIOManagerInterfaceCore:
         for rep in all_reps:
             version_num = version_num_by_id.get(rep["versionId"])
             if version_num is None:
+                continue
+            if not version_filter(version_num, latest_version_num):
                 continue
             new_info = dataclasses.replace(
                 entity_info,
