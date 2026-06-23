@@ -16,7 +16,7 @@ from openassetio.hostApi import Manager
 from openassetio.trait import TraitsData
 from openassetio.utils import FileUrlPathConverter
 
-from .conftest import ProjectInfo
+from .conftest import ProjectInfo, VersionedRepresentation
 
 
 def test_manager_discovery(
@@ -926,3 +926,258 @@ def raise_batch_element_error(idx: int, error: BatchElementError) -> None:
 
     """
     raise error
+
+
+def _drain_pager(pager) -> list:
+    """Collect every entity reference from every page of a pager."""
+    all_refs = []
+    while True:
+        page = pager.get()
+        all_refs.extend(page)
+        if not pager.hasNext():
+            break
+        pager.next()
+    return all_refs
+
+
+def _normalize_ref(ref) -> tuple:
+    """Normalize an entity reference for order-insensitive comparison.
+
+    Returns a (scheme, netloc, path, sorted-query-items) tuple, so that
+    URI parameter order doesn't affect equality.
+    """
+    parsed = urllib.parse.urlparse(str(ref))
+    qs = tuple(sorted(urllib.parse.parse_qsl(parsed.query)))
+    return (parsed.scheme, parsed.netloc, parsed.path, qs)
+
+
+def _ref_to_versioned(
+    manager: Manager,
+    versioned: VersionedRepresentation,
+    version_num: int,
+):
+    """Build a reference to a particular version of the test rep."""
+    return manager.createEntityReference(
+        f"ayon+entity://{versioned.project_name}/"
+        f"{versioned.folder_name}?"
+        f"product={versioned.product_name}&"
+        f"version=v{version_num:03d}&"
+        f"representation={versioned.representation_name}"
+    )
+
+
+class Test_getWithRelationship:
+    def test_when_version_relationship_then_all_versions_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+
+        input_ref = _ref_to_versioned(manager, versioned_representation, 2)
+
+        relationship = TraitsData()
+        mc_traits.lifecycle.VersionTrait.imbueTo(relationship)
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        related_refs = [_normalize_ref(r) for r in _drain_pager(pagers[0])]
+
+        expected_refs = [
+            _normalize_ref(_ref_to_versioned(manager, versioned_representation, v))
+            for v in sorted(
+                versioned_representation.representations_by_version,
+                reverse=True,
+            )
+        ]
+        assert related_refs == expected_refs
+
+    def test_when_pagination_required_then_results_split_across_pages(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        mc_traits.lifecycle.VersionTrait.imbueTo(relationship)
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=2,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        pager = pagers[0]
+        assert pager is not None
+
+        first_page = pager.get()
+        assert len(first_page) == 2
+        assert pager.hasNext()
+        pager.next()
+        second_page = pager.get()
+        assert len(second_page) == 1
+        assert not pager.hasNext()
+
+    def test_when_unsupported_relationship_then_empty_pager_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        # A relationship without the VersionTrait is not supported - we
+        # expect an empty pager rather than an error.
+        relationship = TraitsData()
+        mc_traits.usage.RelationshipTrait.imbueTo(relationship)
+
+        pagers: list = [None]
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        assert pagers[0] is not None
+        assert _drain_pager(pagers[0]) == []
+
+    def test_when_non_read_access_then_error_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+        input_ref = _ref_to_versioned(manager, versioned_representation, 1)
+
+        relationship = TraitsData()
+        mc_traits.lifecycle.VersionTrait.imbueTo(relationship)
+
+        errors: list = [None]
+
+        def _on_success(idx, pager):
+            raise AssertionError(
+                f"Unexpected success callback: idx={idx} pager={pager}")
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kWrite,
+            context=context,
+            successCallback=_on_success,
+            errorCallback=lambda idx, err: operator.setitem(errors, idx, err),
+        )
+
+        assert errors[0] is not None
+        assert errors[0].code == (
+            BatchElementError.ErrorCode.kEntityAccessError)
+
+    def test_when_non_representation_ref_then_error_returned(
+        self,
+        manager: Manager,
+        project: ProjectInfo,
+    ):
+        context = manager.createContext()
+        # A folder-only reference - not a representation.
+        input_ref = manager.createEntityReference(
+            f"ayon+entity://{project.project_name}/{project.folder.name}"
+        )
+
+        relationship = TraitsData()
+        mc_traits.lifecycle.VersionTrait.imbueTo(relationship)
+
+        errors: list = [None]
+
+        def _on_success(idx, pager):
+            raise AssertionError(
+                f"Unexpected success callback: idx={idx} pager={pager}")
+
+        manager.getWithRelationship(
+            entityReferences=[input_ref],
+            relationshipTraitsData=relationship,
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=_on_success,
+            errorCallback=lambda idx, err: operator.setitem(errors, idx, err),
+        )
+
+        assert errors[0] is not None
+
+
+class Test_getWithRelationships:
+    def test_when_version_relationship_then_all_versions_returned(
+        self,
+        manager: Manager,
+        versioned_representation: VersionedRepresentation,
+    ):
+        context = manager.createContext()
+
+        input_ref = _ref_to_versioned(manager, versioned_representation, 3)
+
+        version_relationship = TraitsData()
+        mc_traits.lifecycle.VersionTrait.imbueTo(version_relationship)
+        unsupported_relationship = TraitsData()
+        mc_traits.usage.RelationshipTrait.imbueTo(unsupported_relationship)
+
+        pagers: list = [None, None]
+
+        manager.getWithRelationships(
+            entityReference=input_ref,
+            relationshipTraitsDatas=[
+                version_relationship,
+                unsupported_relationship,
+            ],
+            pageSize=10,
+            relationsAccess=access.RelationsAccess.kRead,
+            context=context,
+            successCallback=lambda idx, pager: operator.setitem(
+                pagers, idx, pager),
+            errorCallback=raise_batch_element_error,
+        )
+
+        # Versions relationship: latest first.
+        assert pagers[0] is not None
+        version_refs = [_normalize_ref(r) for r in _drain_pager(pagers[0])]
+        expected_refs = [
+            _normalize_ref(_ref_to_versioned(manager, versioned_representation, v))
+            for v in sorted(
+                versioned_representation.representations_by_version,
+                reverse=True,
+            )
+        ]
+        assert version_refs == expected_refs
+
+        # Unsupported relationship: empty pager (not an error).
+        assert pagers[1] is not None
+        assert _drain_pager(pagers[1]) == []
+
+
+

@@ -16,6 +16,7 @@ from openassetio.pluginSystem import (
 
 from .utils import create_file_list
 
+
 AYON_SERVER_URL = "http://localhost:5000"
 AYON_API_KEY = ""
 AYON_BUNDLE_NAME = ""
@@ -409,3 +410,104 @@ def project(tmp_path_factory, printer_session, ayon_connection_env) -> pytest.fi
     printer_session(f"tearing down project {project_name}...")
     response = session.delete(f"{server_url}/api/projects/{project_name}")
     assert response.status_code == 204
+
+
+@dataclass
+class VersionedRepresentation:
+    """Multiple published versions of a single representation.
+
+    Created by the ``versioned_representation`` fixture, for use by tests
+    that need to exercise relationship queries across versions.
+    """
+
+    project_name: str
+    folder_name: str
+    product_name: str
+    representation_name: str
+    # Version number -> representation id, ordered oldest first.
+    representations_by_version: dict[int, str]
+
+
+@pytest.fixture(scope="session")
+def versioned_representation(
+    project: ProjectInfo, ayon_connection_env, printer_session
+) -> VersionedRepresentation:
+    """Create extra versions of a fresh product/representation.
+
+    Adds three versions (v001..v003) of a new product ``versionedMain``
+    with a single ``exr`` representation each, in the existing test
+    project. Distinct from the products used by other tests so that test
+    ordering does not affect results.
+    """
+    server_url, api_key = ayon_connection_env
+    session = requests.Session()
+    session.headers.update({"x-api-key": api_key})
+
+    product_name = "versionedMain"
+    product_type = "render"
+    representation_name = "exr"
+
+    printer_session(
+        f"creating versioned product {product_name} in {project.project_name}"
+    )
+
+    response = session.post(
+        f"{server_url}/api/projects/{project.project_name}/products",
+        json={
+            "name": product_name,
+            "folderId": project.folder.id,
+            "productType": product_type,
+        },
+    )
+    assert response.status_code == 201
+    product_id = response.json()["id"]
+
+    representations_by_version: dict[int, str] = {}
+
+    for version_num in (1, 2, 3):
+        response = session.post(
+            f"{server_url}/api/projects/{project.project_name}/versions",
+            json={
+                "version": version_num,
+                "productId": product_id,
+                "taskId": project.task.id,
+                "attrib": {
+                    "frameStart": 1001,
+                    "frameEnd": 1001,
+                },
+            },
+        )
+        assert response.status_code == 201
+        version_id = response.json()["id"]
+
+        file_list = create_file_list(
+            project.project_name,
+            project.project_code,
+            project.folder.name,
+            product_name,
+            version_num,
+            representation_name,
+            1001,
+            1002,
+        )
+        response = session.post(
+            f"{server_url}/api/projects/{project.project_name}/representations",
+            json={
+                "name": representation_name,
+                "versionId": version_id,
+                "files": file_list,
+                "data": {"context": {}},
+                "attrib": {},
+            },
+        )
+        assert response.status_code == 201
+        representations_by_version[version_num] = response.json()["id"]
+
+    return VersionedRepresentation(
+        project_name=project.project_name,
+        folder_name=project.folder.name,
+        product_name=product_name,
+        representation_name=representation_name,
+        representations_by_version=representations_by_version,
+    )
+

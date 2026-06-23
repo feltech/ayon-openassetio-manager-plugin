@@ -14,6 +14,7 @@ import openassetio
 from openassetio import Context, EntityReference, access, constants
 from openassetio.errors import BatchElementError
 from openassetio.managerApi import (
+    EntityReferencePagerInterface,
     HostSession,
     ManagerInterface,
     ManagerStateBase,
@@ -153,6 +154,7 @@ class AyonOpenAssetIOManagerInterface(ManagerInterface):
             ManagerInterface.Capability.kExistenceQueries,
             ManagerInterface.Capability.kResolution,
             ManagerInterface.Capability.kStatefulContexts,
+            ManagerInterface.Capability.kRelationshipQueries,
         )
         return capability in supported_capabilities
 
@@ -423,9 +425,9 @@ class AyonOpenAssetIOManagerInterface(ManagerInterface):
         pageSize: int,
         relationsAccess: access.RelationsAccess,
         context: Context,
-        hostSession: HostSession,
-        successCallback: Callable[[int, TraitsData], Any],
-        errorCallback: Callable[[int, BatchElementError], Any],
+        hostSession: HostSession,  # noqa: N803
+        successCallback: Callable[[int, EntityReferencePagerInterface], None],  # noqa: N803
+        errorCallback: Callable[[int, BatchElementError], Any],  # noqa: N803
     ) -> None:
         """Get entities related to the given entity references.
 
@@ -441,8 +443,8 @@ class AyonOpenAssetIOManagerInterface(ManagerInterface):
                 relationship query.
             context (Context): The context for the relationship query.
             hostSession (HostSession): The host session.
-            successCallback (Callable[[int, TraitsData], Any]): The callback
-                to call on success.
+            successCallback (Callable[[int, EntityReferencePagerInterface],
+                None]): The callback to call on success.
             errorCallback (Callable[[int, BatchElementError], Any]): The
                 callback to call on error.
 
@@ -473,9 +475,9 @@ class AyonOpenAssetIOManagerInterface(ManagerInterface):
         pageSize: int,
         relationsAccess: access.RelationsAccess,
         context: Context,
-        hostSession: HostSession,
-        successCallback: Callable[[int, TraitsData], Any],
-        errorCallback: Callable[[int, BatchElementError], Any],
+        hostSession: HostSession,  # noqa: N803
+        successCallback: Callable[[int, EntityReferencePagerInterface], None],  # noqa: N803
+        errorCallback: Callable[[int, BatchElementError], Any],  # noqa: N803
     ) -> None:
         """Get entities related to the given entity reference.
 
@@ -494,8 +496,8 @@ class AyonOpenAssetIOManagerInterface(ManagerInterface):
                 relationship query.
             context (Context): The context for the relationship query.
             hostSession (HostSession): The host session.
-            successCallback (Callable[[int, TraitsData], Any]): The callback
-                to call on success.
+            successCallback (Callable[[int, EntityReferencePagerInterface],
+                None]): The callback to call on success.
             errorCallback (Callable[[int, BatchElementError], Any]): The
                 callback to call on error.
 

@@ -1,6 +1,7 @@
 """Core implementation of the AYON OpenAssetIO Manager Interface."""
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 from pathlib import Path
 from threading import Lock
@@ -13,7 +14,11 @@ from ayon_core import pipeline
 from cachetools import TTLCache
 from openassetio import Context, EntityReference, access
 from openassetio.errors import BatchElementError
-from openassetio.managerApi import HostSession, ManagerStateBase
+from openassetio.managerApi import (
+    EntityReferencePagerInterface,
+    HostSession,
+    ManagerStateBase,
+)
 from openassetio.trait import TraitsData
 from openassetio.utils import FileUrlPathConverter
 from openassetio_mediacreation.traits.managementPolicy import ManagedTrait
@@ -790,33 +795,284 @@ class AyonOpenAssetIOManagerInterfaceCore:
         self,
         entity_references: list[EntityReference],
         relationship_traits_data: TraitsData,
-        result_trait_set: set[str],
+        result_trait_set: set[str],  # noqa: ARG002
         page_size: int,
         relations_access: access.RelationsAccess,
-        context: Context,
-        host_session: HostSession,
-        success_callback: Callable[[int, list[EntityReference]], Any],
+        _context: Context,
+        _host_session: HostSession,
+        success_callback: Callable[[int, EntityReferencePagerInterface], Any],
         error_callback: Callable[[int, BatchElementError], Any],
     ) -> None:
-        """Not implemented."""
-        msg = "getWithRelationship is not supported"
-        raise NotImplementedError(msg)
+        """Get entities related to the given entity references.
+
+        Currently only supports the VersionTrait relationship with kRead
+        access. For each input representation reference, returns a pager
+        of references to all versions of the same representation
+        (including the input version itself).
+
+        The ``result_trait_set`` parameter is currently ignored.
+
+        Args:
+            entity_references (list[EntityReference]): The entity
+                references for which to look up related entities.
+            relationship_traits_data (TraitsData): The traits data
+                describing the relationship to query.
+            result_trait_set (set[str]): The trait set of the related
+                entities (currently ignored).
+            page_size (int): The page size for the returned pager.
+            relations_access (access.RelationsAccess): The access mode
+                for the relationship query.
+            _context (Context): The context.
+            _host_session (HostSession): The host session.
+            success_callback (Callable[[int, EntityReferencePagerInterface],
+                Any]): The success callback.
+            error_callback (Callable[[int, BatchElementError], Any]):
+                The error callback.
+
+        """
+        if not self.__validate_relationship_access(
+            relations_access, len(entity_references), error_callback
+        ):
+            return
+
+        if not self.__is_version_relationship(relationship_traits_data):
+            # Unsupported relationship - return empty pagers.
+            for idx in range(len(entity_references)):
+                success_callback(
+                    idx, _AyonEntityReferencePagerInterface(page_size, [])
+                )
+            return
+
+        entity_identities = ayon_core_util.query_identity_for_entity_refs(
+            [str(ref) for ref in entity_references]
+        )
+
+        for idx, entity_ref in enumerate(entity_references):
+            self.__handle_version_relationship(
+                idx,
+                entity_ref,
+                entity_identities[idx],
+                page_size,
+                success_callback,
+                error_callback,
+            )
 
     def getWithRelationships(  # noqa: N802, PLR0913, PLR0917
         self,
         entity_reference: EntityReference,
         relationship_traits_datas: list[TraitsData],
-        result_trait_set: set[str],
+        result_trait_set: set[str],  # noqa: ARG002
         page_size: int,
         relations_access: access.RelationsAccess,
-        context: Context,
-        host_session: HostSession,
-        success_callback: Callable[[int, list[EntityReference]], Any],
+        _context: Context,
+        _host_session: HostSession,
+        success_callback: Callable[[int, EntityReferencePagerInterface], Any],
         error_callback: Callable[[int, BatchElementError], Any],
     ) -> None:
-        """Not implemented."""
-        msg = "getWithRelationships is not supported"
-        raise NotImplementedError(msg)
+        """Get entities related to a single entity reference.
+
+        Currently only supports the VersionTrait relationship with kRead
+        access. For each relationship in the batch, returns a pager of
+        references to all versions of the same representation referred
+        to by ``entity_reference``.
+
+        The ``result_trait_set`` parameter is currently ignored.
+
+        Args:
+            entity_reference (EntityReference): The entity reference for
+                which to look up related entities.
+            relationship_traits_datas (list[TraitsData]): The traits data
+                for each relationship to query.
+            result_trait_set (set[str]): The trait set of the related
+                entities (currently ignored).
+            page_size (int): The page size for the returned pager.
+            relations_access (access.RelationsAccess): The access mode
+                for the relationship query.
+            _context (Context): The context.
+            _host_session (HostSession): The host session.
+            success_callback (Callable[[int, EntityReferencePagerInterface],
+                Any]): The success callback.
+            error_callback (Callable[[int, BatchElementError], Any]):
+                The error callback.
+
+        """
+        if not self.__validate_relationship_access(
+            relations_access, len(relationship_traits_datas), error_callback
+        ):
+            return
+
+        # Resolve the identity of the input reference once.
+        entity_identity = ayon_core_util.query_identity_for_entity_refs(
+            [str(entity_reference)]
+        )[0]
+
+        for idx, relationship_traits_data in enumerate(
+                relationship_traits_datas):
+            if not self.__is_version_relationship(relationship_traits_data):
+                success_callback(
+                    idx, _AyonEntityReferencePagerInterface(page_size, [])
+                )
+                continue
+
+            self.__handle_version_relationship(
+                idx,
+                entity_reference,
+                entity_identity,
+                page_size,
+                success_callback,
+                error_callback,
+            )
+
+    @staticmethod
+    def __is_version_relationship(
+            relationship_traits_data: TraitsData) -> bool:
+        """Whether the given relationship data is a Version query.
+
+        We support the Version trait being present in the relationship
+        trait set, regardless of any other traits.
+        """
+        return mc_traits.lifecycle.VersionTrait.isImbuedTo(
+            relationship_traits_data)
+
+    @staticmethod
+    def __validate_relationship_access(
+        relations_access: access.RelationsAccess,
+        batch_size: int,
+        error_callback: Callable[[int, BatchElementError], Any],
+    ) -> bool:
+        """Validate the access mode for a relationship query.
+
+        Currently only kRead access is supported.
+        """
+        if relations_access == access.RelationsAccess.kRead:
+            return True
+        for idx in range(batch_size):
+            error_callback(
+                idx,
+                BatchElementError(
+                    BatchElementError.ErrorCode.kEntityAccessError,
+                    "Only kRead access is supported for relationship queries",
+                ),
+            )
+        return False
+
+    @staticmethod
+    def __handle_version_relationship(  # noqa: PLR0913, PLR0917
+        idx: int,
+        entity_ref: EntityReference,
+        entity_identity: dict,
+        page_size: int,
+        success_callback: Callable[[int, EntityReferencePagerInterface], Any],
+        error_callback: Callable[[int, BatchElementError], Any],
+    ) -> None:
+        """Resolve and return all versions of the given representation.
+
+        Builds a pager of entity references corresponding to all versions
+        of the representation pointed to by ``entity_ref``. Reports
+        ``kEntityResolutionError`` if the reference cannot be resolved,
+        and ``kInvalidEntityReference`` if it does not point to a
+        representation.
+        """
+        entities = entity_identity.get("entities") or []
+        if not entities:
+            error_callback(
+                idx,
+                BatchElementError(
+                    BatchElementError.ErrorCode.kEntityResolutionError,
+                    "Entity not found",
+                ),
+            )
+            return
+
+        entity = entities[-1]
+        representation_id = entity.get("representationId")
+        version_id = entity.get("versionId")
+        if not representation_id or not version_id:
+            error_callback(
+                idx,
+                BatchElementError(
+                    BatchElementError.ErrorCode.kInvalidEntityReference,
+                    "Version relationship queries are only supported for "
+                    "representation entity references",
+                ),
+            )
+            return
+
+        entity_info = ayon.parse_entity_ref(str(entity_ref))
+
+        if not entity_info.representation_name:
+            error_callback(
+                idx,
+                BatchElementError(
+                    BatchElementError.ErrorCode.kInvalidEntityReference,
+                    "Entity reference must include a representation name",
+                ),
+            )
+            return
+
+        # Find the product (i.e. the logical entity) that owns this version.
+        current_version = ayon_api.get_version_by_id(
+            entity_info.project_name, version_id, fields=["productId"]
+        )
+        if current_version is None:
+            error_callback(
+                idx,
+                BatchElementError(
+                    BatchElementError.ErrorCode.kEntityResolutionError,
+                    "Could not resolve product for entity",
+                ),
+            )
+            return
+
+        product_id = current_version["productId"]
+
+        # Fetch all versions of the product and all representations of
+        # those versions matching the input representation name.
+        all_versions = list(
+            ayon_api.get_versions(
+                entity_info.project_name,
+                product_ids=[product_id],
+                fields=["id", "version"],
+            )
+        )
+        version_num_by_id = {v["id"]: v["version"] for v in all_versions}
+        version_ids = list(version_num_by_id.keys())
+
+        all_reps = list(
+            ayon_api.get_representations(
+                entity_info.project_name,
+                version_ids=version_ids,
+                representation_names=[entity_info.representation_name],
+                fields=["id", "versionId"],
+            )
+        ) if version_ids else []
+
+        # Order results by version number (most recent first), so that the
+        # input version typically appears near the top.
+        all_reps.sort(
+            key=lambda rep: version_num_by_id.get(rep["versionId"], 0),
+            reverse=True,
+        )
+
+        related_refs: list[EntityReference] = []
+        for rep in all_reps:
+            version_num = version_num_by_id.get(rep["versionId"])
+            if version_num is None:
+                continue
+            new_info = dataclasses.replace(
+                entity_info,
+                version_name=f"v{version_num:03d}",
+                # Drop preflight/working metadata - these refs point at
+                # already-published versions.
+                preflight_data=None,
+            )
+            related_refs.append(
+                EntityReference(ayon.build_entity_ref(new_info))
+            )
+
+        success_callback(
+            idx, _AyonEntityReferencePagerInterface(page_size, related_refs)
+        )
 
     @staticmethod
     def __query_frame_padding(project_name: str) -> int:
@@ -857,3 +1113,48 @@ class AyonOpenAssetIOManagerInterfaceCore:
 
         # The "OpenAssetIO standard" (subset of fmtlib/Python format strings).
         return f"{{frame:0{frame_padding}}}"
+
+
+class _AyonEntityReferencePagerInterface(EntityReferencePagerInterface):
+    """Simple in-memory pager.
+
+    All entity references are queried up-front, then split into pages
+    of the requested size, ready to be returned on demand.
+    """
+
+    def __init__(
+            self, page_size: int, entity_references: list[EntityReference]):
+        """Constructor.
+
+        Args:
+            page_size (int): The desired page size. Must be > 0.
+            entity_references (list[EntityReference]): The full list of
+                entity references to paginate.
+
+        """
+        EntityReferencePagerInterface.__init__(self)
+        self.__page_num = 0
+        self.__pages: list[list[EntityReference]] = []
+        if page_size <= 0:
+            page_size = max(1, len(entity_references))
+        for page_start in range(0, len(entity_references), page_size):
+            self.__pages.append(
+                entity_references[page_start:page_start + page_size]
+            )
+
+    def close(self, _host_session: HostSession) -> None:  # noqa: D102
+        # Nothing to clean up.
+        self.__pages = []
+
+    def hasNext(self, _host_session: HostSession) -> bool:  # noqa: N802, D102
+        return self.__page_num < len(self.__pages) - 1
+
+    def next(self, _host_session: HostSession) -> None:  # noqa: D102
+        if self.__page_num < len(self.__pages):
+            self.__page_num += 1
+
+    def get(self, _host_session: HostSession) -> list[EntityReference]:  # noqa: D102
+        if self.__page_num >= len(self.__pages):
+            return []
+        return list(self.__pages[self.__page_num])
+
